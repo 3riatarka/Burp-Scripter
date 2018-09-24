@@ -3,6 +3,7 @@ package burp;
 import java.io.*;
 import java.util.List;
 import java.util.Arrays;
+import java.util.ArrayList;
 import java.awt.Component;
 import java.io.PrintWriter;
 import javax.swing.JPanel;
@@ -31,9 +32,11 @@ public class BurpExtender implements IBurpExtender,  IHttpListener, ISessionHand
     private IHttpRequestResponse currentlyDisplayedItem;
     private JPanel panel;
 
+    private static final String EMPTY_STRING = "";
     private String user_script;
-    private List<java.lang.String> input_parameters;
-    private List<java.lang.String> parameter_values;
+    private List<java.lang.String> parameters_to_inject;
+    private List<java.lang.String> parameters_values_to_inject;
+    private List<java.lang.String> script_parameters;
 
     @Override
     public void registerExtenderCallbacks(final IBurpExtenderCallbacks callbacks) {
@@ -75,6 +78,17 @@ public class BurpExtender implements IBurpExtender,  IHttpListener, ISessionHand
                 String scriptText = callbacks.loadExtensionSetting("Script");
                 if (scriptText != null) {script.setText(scriptText); stdout.println("Loaded settings for Script field: "+scriptText);}
                 boxHorizontal.add(script);
+                boxVertical.add(boxHorizontal);
+
+                boxVertical.add(Box.createRigidArea(new Dimension(0,15)));
+
+                boxHorizontal = Box.createHorizontalBox();
+                boxHorizontal.add(new JLabel("Script parameter list:  "));
+                boxHorizontal.add(Box.createRigidArea(new Dimension(5,0)));
+                JTextField script_params = new JTextField("",10);
+                String script_paramsText = callbacks.loadExtensionSetting("Script_params");
+                if (script_paramsText != null) {script_params.setText(script_paramsText); stdout.println("Loaded settings for Script_params field: "+script_paramsText);}
+                boxHorizontal.add(script_params);
                 boxVertical.add(boxHorizontal);
 
                 boxVertical.add(Box.createRigidArea(new Dimension(0,15)));
@@ -130,7 +144,8 @@ public class BurpExtender implements IBurpExtender,  IHttpListener, ISessionHand
                     public void actionPerformed(ActionEvent e2){
                         callbacks.saveExtensionSetting("Script", ""+script.getText());
                         callbacks.saveExtensionSetting("Params", ""+params.getText());
-                        stdout.println("Saved settings: "+script.getText()+", "+params.getText());
+                        callbacks.saveExtensionSetting("Script_params", ""+script_params.getText());
+                        stdout.println("Saved settings: "+script.getText()+", "+params.getText()+", "+script_params.getText());
                     }
                 });
                 boxHorizontal.add(save);
@@ -142,6 +157,7 @@ public class BurpExtender implements IBurpExtender,  IHttpListener, ISessionHand
                     public void actionPerformed(ActionEvent e3){
                         script.setText("");
                         params.setText("");
+                        script_params.setText("");
                     }
                 });
                 boxHorizontal.add(clear);
@@ -179,7 +195,8 @@ public class BurpExtender implements IBurpExtender,  IHttpListener, ISessionHand
                 callbacks.addSuiteTab(BurpExtender.this);
 
                 user_script = script.getText();
-                input_parameters = Arrays.asList(params.getText().split(","));
+                parameters_to_inject = Arrays.asList(params.getText().split(","));
+                script_parameters = Arrays.asList(script_params.getText().split(","));
 
             }
         });
@@ -203,24 +220,6 @@ public class BurpExtender implements IBurpExtender,  IHttpListener, ISessionHand
 
         stdout.println("");
 
-        // Execute the user supplied script:
-        try{
-            String line;
-            String output = "";
-            Process p = Runtime.getRuntime().exec(user_script);
-            BufferedReader input = new BufferedReader(new InputStreamReader((p.getInputStream())));
-            while ((line = input.readLine()) != null) {output += line.replaceAll("\\s+","");}
-            parameter_values = Arrays.asList(output.split(","));
-            if (parameter_values.size() != input_parameters.size()) {throw new RuntimeException("The number of parameters supplied doesn't match the parameters received from the script");}
-        } catch (IOException ex){
-            StringWriter sw = new StringWriter();
-            PrintWriter pw = new PrintWriter(sw);
-            ex.printStackTrace(pw);
-            String sStackTrace = sw.toString();
-            stderr.println(sStackTrace);
-            //stderr.println(ex);
-        }
-
         // Get the request
         String strrequest = new String(currentRequest.getRequest());
         // Get the request info:
@@ -233,13 +232,48 @@ public class BurpExtender implements IBurpExtender,  IHttpListener, ISessionHand
         // Re-compose the original request
         byte[] request = helpers.buildHttpMessage(headers, messageBody.getBytes());
 
-        for (int i=0; i < input_parameters.size(); i++){
+        ArrayList<String> script_parameter_values = new ArrayList<String>();
+
+        List<IParameter> params = rqInfo.getParameters();
+        for (int i=0; i < params.size(); i++) {
+            for (int j=0; j < script_parameters.size(); j++){
+                if (params.get(i).getName().equals(script_parameters.get(j))) {
+                    stdout.println("Matched "+params.get(i).getName()+"! (" + params.get(i).getValue() + ")");
+                    script_parameter_values.add(params.get(i).getValue());
+                }
+            }
+        }
+
+        // Execute the user supplied script:
+        try{
+            String line;
+            String output = "";
+            String command[] = new String[script_parameter_values.size()+1];
+            command[0] = user_script;
+            for (int i=0; i < script_parameter_values.size(); i++) {
+                command[i+1] = script_parameter_values.get(i);
+            }
+            Process p = Runtime.getRuntime().exec(command);
+            BufferedReader input = new BufferedReader(new InputStreamReader((p.getInputStream())));
+            while ((line = input.readLine()) != null) {output += line.replaceAll("\\s+","");}
+            parameters_values_to_inject = Arrays.asList(output.split(","));
+            if (parameters_values_to_inject.size() != parameters_to_inject.size()) {throw new RuntimeException("The number of parameters supplied doesn't match the parameters received from the script");}
+        } catch (IOException ex){
+            StringWriter sw = new StringWriter();
+            PrintWriter pw = new PrintWriter(sw);
+            ex.printStackTrace(pw);
+            String sStackTrace = sw.toString();
+            stderr.println(sStackTrace);
+            //stderr.println(ex);
+        }
+
+        for (int i=0; i < parameters_to_inject.size(); i++){
             try {
-                IParameter out_parameter = helpers.buildParameter(input_parameters.get(i), parameter_values.get(i), helpers.getRequestParameter(request, input_parameters.get(i)).getType());
+                IParameter out_parameter = helpers.buildParameter(parameters_to_inject.get(i), parameters_values_to_inject.get(i), helpers.getRequestParameter(request, parameters_to_inject.get(i)).getType());
                 stdout.println("Updating parameter " + out_parameter.getName() + ": " + out_parameter.getValue());
                 request = helpers.updateParameter(request, out_parameter);
             } catch (Exception ex2) {
-                stderr.println("Exception updating parameter\n -Parameter: "+input_parameters.get(i));
+                stderr.println("Exception updating parameter\n -Parameter: "+parameters_to_inject.get(i));
                 StringWriter sw = new StringWriter();
                 PrintWriter pw = new PrintWriter(sw);
                 ex2.printStackTrace(pw);
